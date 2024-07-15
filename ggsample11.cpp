@@ -47,6 +47,8 @@ const GgSimpleShader::Material shadowMaterial
 // ワールド座標系の光源位置
 const GgVector lp{ 0.0f, 4.0f, 0.0f, 1.0f };
 
+const GLfloat lt[] = { 0.0f, 0.0f, 0.0f, 1.0f };
+
 // アニメーションの変換行列を求める
 static GgMatrix animate(GLfloat t, int i)
 {
@@ -64,6 +66,9 @@ int GgApp::main(int argc, const char* const* argv)
 {
   // ウィンドウを作成する (この行は変更しないでください)
   Window window{ argc > 1 ? argv[1] : PROJECT_NAME, dWidth, dHeight };
+
+  //ウィンドウサイズの変更を抑制する
+  glfwSetWindowSizeLimits(window.get(), dWidth, dHeight, GLFW_DONT_CARE, GLFW_DONT_CARE);
 
   // プログラムオブジェクトの作成
   GgSimpleShader shader{ PROJECT_NAME ".vert", PROJECT_NAME ".frag" };
@@ -94,6 +99,20 @@ int GgApp::main(int argc, const char* const* argv)
     objectMaterialBuffer.loadAmbientAndDiffuse(r, g, b, 1.0f, i);
   }
 
+  //デプステクスチャを作る
+  GLuint dtex;
+  glGenTextures(1, &dtex);
+  glBindTexture(GL_TEXTURE_2D, dtex);
+  glTexImage2D(GL_TEXTURE_2D,0, GL_DEPTH_COMPONENT, dWidth, dHeight, 0, GL_DEPTH_COMPONENT, GL_FLOAT, 0);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_COMPARE_MODE, GL_COMPARE_REF_TO_TEXTURE);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_COMPARE_FUNC, GL_LEQUAL);
+  std::unique_ptr<GLfloat> depth(new GLfloat[dWidth * dWidth]);
+
   // ビュー変換行列を mv に求める
   const auto mv{ ggLookat(0.0f, 3.0f, 8.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f, 0.0f) };
 
@@ -114,12 +133,28 @@ int GgApp::main(int argc, const char* const* argv)
   //
   const GLfloat m[]
   {
-      2.0f,   0.0f,   0.0f,   0.0f,
+      1.0f,   0.0f,   0.0f,   0.0f,
       0.0f,   0.0f,   0.0f,   0.0f,
       0.0f,   0.0f,   1.0f,   0.0f,
       0.0f,   0.0f,   0.0f,   1.0f
   };
-  const GgMatrix ms{ m };
+
+  //視点座標系の光源位置を求め光源データに設定
+  mv.projection(light.position, lp);
+
+  //影付き処理用の視野変換行列を求める
+  const GgMatrix mvs(ggLookat(lp[0], lp[1], lp[2], lt[0], lt[1], lt[2], 0.0f, 0.0f, 1.0f));
+
+  //影付き処理用の投影変換行列を求める
+  const GgMatrix mps(ggPerspective(1.5f, 1.0f, 1.0f, 5.0f));
+
+  //影付き処理用の視野変換行列を求める
+  const GgMatrix ms(mps * mvs);
+
+  //デプステクスチャのサンプラのuniform変数の場所
+  const GLint depthLoc(glGetUniformLocation(shader.get(), "depth"));
+  //シャドウマップ用の変換行列のuniform変数の場所を取り出す
+  const GLint msLoc(glGetUniformLocation(shader.get(), "ms"));
 
   //
   // その他の設定
@@ -147,6 +182,33 @@ int GgApp::main(int argc, const char* const* argv)
     // シェーダプログラムの使用開始
     shader.use(lightBuffer);
 
+    //視点を光源位置においてレンダリング
+    glViewport(0, 0, dWidth, dHeight);
+    glClear(GL_DEPTH_BUFFER_BIT);
+    for (int i = 1; i <= objects; ++i)
+    {
+      const GgMatrix ma(animate(t, i));
+      shader.loadMatrix(mps, mvs * ma);
+      object->draw();
+    }
+
+    //デプスバッファをテクスチャに転送 
+    glReadPixels(0, 0, dWidth, dHeight, GL_DEPTH_COMPONENT, GL_FLOAT, depth.get());
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, dtex);
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, dWidth, dHeight, GL_DEPTH_COMPONENT, GL_FLOAT, depth.get());
+
+    //デプステクスチャのテクスチャユニットを指定する
+    glUniform1i(depthLoc, 0);
+    glUniformMatrix4fv(msLoc, 1, GL_FALSE, ms.get());
+
+    //ポリゴンオフセットの追加
+    glPolygonOffset(1.0f, 1.0f);
+    glEnable(GL_POLYGON_OFFSET_FILL);
+
+    //視点方向からのレンダリング
+    glViewport(0, 0, window.getWidth(), window.getHeight());
+
     // 画面消去
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
@@ -168,7 +230,7 @@ int GgApp::main(int argc, const char* const* argv)
     materialBuffer.select();
 
     // 影の描画
-    glDisable(GL_DEPTH_TEST);
+    //glDisable(GL_DEPTH_TEST);
     for (int i = 0; i < objects; ++i)
     {
       // アニメーションの変換行列
